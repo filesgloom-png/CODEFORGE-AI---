@@ -4,25 +4,26 @@ An Android-controlled, GitHub-first autonomous coding agent.
 
 ## Current milestone
 
-The repository has a deterministic task-planning core and a dependency-free adapter for the OpenAI Responses API. Adapter tests use mocked HTTP responses, so CI never needs a real API key. The agent does not yet edit external repositories or autonomously execute generated code.
+The repository has a deterministic task-planning core and a dependency-free adapter for the Gemini generateContent API. Adapter tests use mocked HTTP responses, so CI never needs a real API key. The agent does not yet edit external repositories or autonomously execute generated code.
 
 ## Architecture
 
 - **Android client (planned):** submit tasks, follow progress, inspect results.
 - **Agent core:** task validation, planning, bounded tool execution, project memory, and repair loop.
-- **Model adapter:** server-side OpenAI Responses API client in `app/model.py`.
+- **Model adapter:** server-side Gemini API client in `app/model.py`.
 - **GitHub adapter (planned):** inspect files, work on a branch, commit changes, and read Actions logs.
 - **CI gate:** compile Python and run unit tests after every push and pull request.
 
-## Model configuration
+## Free model configuration
+
+Gemini API offers a free tier for supported models, subject to changing model-specific quotas and rate limits. Do not enable billing if the requirement is strictly $0. A free-tier key can be created in [Google AI Studio](https://aistudio.google.com/apikey).
 
 Configure these as environment variables on a trusted server or deployment runtime:
 
-- `OPENAI_API_KEY` — required API key; store it as a secret, never in source code.
-- `OPENAI_MODEL` — optional model name; defaults to `gpt-4.1-mini`.
-- `OPENAI_BASE_URL` — optional API endpoint override.
+- `GEMINI_API_KEY` — free-tier API key; store it as a secret, never in source code.
+- `GEMINI_MODEL` — optional model name; defaults to `gemini-2.5-flash`.
 
-The Android app must never contain the provider key. A GitHub Actions secret is available only to workflows that explicitly receive it; do not expose it to pull-request code or print it in logs. The current CI intentionally does not call the live model, and adding a repository secret is a separate manual settings step.
+The Android app must never contain the provider key. Never print the key in logs or expose it to pull-request code. The current CI intentionally does not call the live model, and adding a repository secret is a separate settings step. Free-tier quotas may change or be exhausted; the client must handle provider errors without exposing secrets.
 
 ## Safety defaults
 

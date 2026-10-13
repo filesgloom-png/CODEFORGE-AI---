@@ -1,65 +1,70 @@
-"""Unit tests for the hosted model adapter; no live API key is needed."""
+"""Unit tests for the Gemini adapter; no live API key is needed."""
 import io
 import json
 import unittest
 from unittest.mock import patch
 
 from app.model import (
+    GeminiClient,
     ModelConfigurationError,
     ModelProviderError,
-    OpenAIResponsesClient,
     _extract_text,
 )
 
 
 class ModelAdapterTests(unittest.TestCase):
     def test_requires_api_key(self):
-        client = OpenAIResponsesClient(api_key="", model="test-model")
+        client = GeminiClient(api_key="", model="test-model")
         with self.assertRaises(ModelConfigurationError):
             client.generate("Write a function")
 
     def test_rejects_empty_prompt(self):
-        client = OpenAIResponsesClient(api_key="test-key", model="test-model")
+        client = GeminiClient(api_key="test-key", model="test-model")
         with self.assertRaises(ValueError):
             client.generate("  ")
 
-    def test_extracts_top_level_output_text(self):
-        self.assertEqual(_extract_text({"output_text": "  Hello  "}), "Hello")
-
-    def test_extracts_text_from_responses_output_array(self):
+    def test_extracts_generated_text(self):
         payload = {
-            "output": [
-                {"type": "message", "content": [
-                    {"type": "output_text", "text": "First"},
-                    {"type": "output_text", "text": "Second"},
+            "candidates": [{
+                "content": {"parts": [
+                    {"text": "Implement "},
+                    {"text": "the function."},
                 ]}
-            ]
+            }]
         }
-        self.assertEqual(_extract_text(payload), "First\nSecond")
+        self.assertEqual(_extract_text(payload), "Implement \nthe function.")
 
     def test_rejects_response_without_text(self):
         with self.assertRaises(ModelProviderError):
-            _extract_text({"output": []})
+            _extract_text({"candidates": []})
 
     @patch("app.model.urlopen")
     def test_sends_model_prompt_and_returns_text(self, mocked_urlopen):
         mocked_urlopen.return_value = io.BytesIO(
-            json.dumps({"output_text": "Implement the function."}).encode("utf-8")
+            json.dumps({
+                "candidates": [{
+                    "content": {"parts": [{"text": "Implement the function."}]}
+                }]
+            }).encode("utf-8")
         )
-        client = OpenAIResponsesClient(
+        client = GeminiClient(
             api_key="test-key",
             model="test-model",
-            base_url="https://example.invalid/v1/responses",
+            base_url="https://example.invalid/v1beta",
         )
         result = client.generate("Create a function", instructions="Be concise")
         self.assertEqual(result, "Implement the function.")
 
         request = mocked_urlopen.call_args.args[0]
         body = json.loads(request.data.decode("utf-8"))
-        self.assertEqual(body["model"], "test-model")
-        self.assertEqual(body["input"], "Create a function")
-        self.assertEqual(body["instructions"], "Be concise")
-        self.assertEqual(request.get_header("Authorization"), "Bearer test-key")
+        self.assertEqual(
+            body["contents"][0]["parts"][0]["text"], "Create a function"
+        )
+        self.assertEqual(
+            body["systemInstruction"]["parts"][0]["text"], "Be concise"
+        )
+        self.assertEqual(request.get_header("X-goog-api-key"), "test-key")
+        self.assertIn("/models/test-model:generateContent", request.full_url)
         mocked_urlopen.assert_called_once()
 
     @patch("app.model.urlopen")
@@ -69,7 +74,7 @@ class ModelAdapterTests(unittest.TestCase):
         mocked_urlopen.side_effect = HTTPError(
             "https://example.invalid", 401, "Unauthorized", {}, io.BytesIO(b"secret details")
         )
-        client = OpenAIResponsesClient(api_key="test-key", model="test-model")
+        client = GeminiClient(api_key="test-key", model="test-model")
         with self.assertRaises(ModelProviderError) as caught:
             client.generate("Hello")
         self.assertIn("HTTP 401", str(caught.exception))
