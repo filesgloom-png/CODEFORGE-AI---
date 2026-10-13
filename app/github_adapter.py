@@ -19,7 +19,7 @@ class GitHubAdapterError(RuntimeError):
     """Raised when GitHub data cannot be retrieved safely."""
 
 
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_FILE_BYTES = 500_000
 
