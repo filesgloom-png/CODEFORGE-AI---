@@ -13,6 +13,7 @@ from app.core import TaskKind, TaskRequest, plan_task
 from app.diagnostics import diagnose_log, next_repair_action
 from app.github_adapter import GitHubReadOnlyAdapter
 from app.github_writer import GitHubPatchWriter
+from app.memory import ProjectMemory
 from app.patches import validate_changes, PatchValidationError
 
 
@@ -33,10 +34,29 @@ class ControlledAgentWorkflow:
         token: str | None = None,
         reader: GitHubReadOnlyAdapter | None = None,
         writer: GitHubPatchWriter | None = None,
+        memory: ProjectMemory | None = None,
     ) -> None:
         self.repository = repository
         self.reader = reader or GitHubReadOnlyAdapter(repository, token=token)
         self.writer = writer or GitHubPatchWriter(repository, token=token)
+        self.memory = memory if memory is not None else ProjectMemory()
+
+    def recall_memory(self, query: str = "", limit: int = 20) -> WorkflowResult:
+        """Recall explicitly saved project facts and decisions."""
+        items = self.memory.recall(self.repository, query=query, limit=limit)
+        return WorkflowResult(
+            "memory_recalled", self.repository,
+            f"Retrieved {len(items)} saved project memory item(s).",
+            {"items": items},
+        )
+
+    def remember_fact(self, category: str, content: str) -> WorkflowResult:
+        """Save an explicit preference, decision or project fact; secrets are rejected."""
+        item = self.memory.remember(self.repository, category, content)
+        return WorkflowResult(
+            "memory_saved", self.repository, "Project memory saved.",
+            {"item": item},
+        )
 
     def inspect(self, task: TaskRequest, ref: str = "main") -> WorkflowResult:
         """Build a task plan plus a bounded repository and CI snapshot."""
@@ -45,6 +65,11 @@ class ControlledAgentWorkflow:
         plan = plan_task(TaskRequest(task.description, self.repository, task.kind))
         tree = self.reader.get_tree(ref=ref, recursive=True)
         runs = self.reader.list_workflow_runs(branch=ref, limit=5)
+        # Persist only repository metadata, never the raw task prompt.
+        self.memory.remember(
+            self.repository, "workflow_event",
+            json.dumps({"event": "inspect", "ref": ref, "tree_sha": tree.get("sha")}),
+        )
         return WorkflowResult(
             status="inspected",
             repository=self.repository,
@@ -54,6 +79,7 @@ class ControlledAgentWorkflow:
                 "plan": {"steps": list(plan.steps), "requires_repository": plan.requires_repository},
                 "tree": tree,
                 "recent_runs": runs,
+                "memory_items": len(self.memory.recall(self.repository, limit=100)),
             },
         )
 
@@ -98,6 +124,18 @@ class ControlledAgentWorkflow:
             return checked
         published = self.writer.publish_patch(
             raw_patch, base_branch=base_branch, description=description
+        )
+        # Save only non-secret branch metadata. No merge or CI result is inferred.
+        self.memory.remember(
+            self.repository, "workflow_event",
+            json.dumps({
+                "event": "branch_prepared",
+                "base_branch": published.get("base_branch"),
+                "branch": published.get("branch"),
+                "commit_sha": published.get("commit_sha"),
+                "changed_files": published.get("changed_files", []),
+                "checks_run": bool(published.get("checks_run", False)),
+            }),
         )
         return WorkflowResult(
             "branch_prepared", self.repository,
