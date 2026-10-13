@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 from app.core import TaskKind, TaskRequest
 from app.diagnostics import diagnose_log, next_repair_action, redact_secrets
+from app.memory import ProjectMemory
 from app.workflow import ControlledAgentWorkflow
 
 
@@ -12,6 +13,7 @@ class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.reader = Mock()
         self.writer = Mock()
+        self.memory = ProjectMemory(":memory:")
         self.reader.get_tree.return_value = {
             "sha": "tree-sha", "truncated": False,
             "tree": [{"path": "app/existing.py", "type": "blob", "sha": "blob-sha"}],
@@ -21,14 +23,29 @@ class WorkflowTests(unittest.TestCase):
         ]
         self.reader.fetch_job_logs.return_value = "AssertionError: expected result"
         self.workflow = ControlledAgentWorkflow(
-            "owner/repo", token="test-token", reader=self.reader, writer=self.writer
+            "owner/repo", token="test-token", reader=self.reader, writer=self.writer,
+            memory=self.memory,
         )
+
+    def tearDown(self):
+        self.memory.close()
 
     def test_inspection_integrates_plan_tree_and_actions(self):
         result = self.workflow.inspect(TaskRequest("Fix the issue", "owner/repo", TaskKind.FIX))
         self.assertEqual(result.status, "inspected")
         self.assertEqual(result.details["tree"]["tree"][0]["path"], "app/existing.py")
         self.assertEqual(result.details["recent_runs"][0]["conclusion"], "success")
+        memories = self.memory.recall("owner/repo")
+        self.assertEqual(memories[0]["category"], "workflow_event")
+        self.assertNotIn("Fix the issue", memories[0]["content"])
+
+    def test_explicit_memory_rejects_secrets_and_can_be_recalled(self):
+        saved = self.workflow.remember_fact("decision", "Use Python 3.12 for the core.")
+        self.assertEqual(saved.status, "memory_saved")
+        recalled = self.workflow.recall_memory(query="Python")
+        self.assertEqual(len(recalled.details["items"]), 1)
+        with self.assertRaises(ValueError):
+            self.workflow.remember_fact("decision", "token=ghp_abcdefghijklmnopqrstuvwxyz123456")
 
     def test_invalid_patch_never_calls_writer(self):
         result = self.workflow.prepare_branch(json.dumps({"changes": [
@@ -37,10 +54,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "rejected")
         self.writer.publish_patch.assert_not_called()
 
-    def test_valid_patch_calls_writer_only_after_validation(self):
+    def test_valid_patch_calls_writer_only_after_validation_and_records_branch(self):
         self.writer.publish_patch.return_value = {
             "branch": "codeforge/fix-abc1234", "commit_sha": "commit-sha",
-            "changed_files": ["app/new.py"], "checks_run": False,
+            "changed_files": ["app/new.py"], "checks_run": False, "base_branch": "main",
         }
         patch = json.dumps({"changes": [
             {"path": "app/new.py", "action": "create", "content": "print('ok')\n"}
@@ -50,6 +67,8 @@ class WorkflowTests(unittest.TestCase):
         self.writer.publish_patch.assert_called_once_with(
             patch, base_branch="main", description="fix"
         )
+        memories = self.memory.recall("owner/repo")
+        self.assertIn("branch_prepared", memories[0]["content"])
 
     def test_truncated_tree_blocks_validation(self):
         self.reader.get_tree.return_value = {"sha": "tree", "truncated": True, "tree": []}
