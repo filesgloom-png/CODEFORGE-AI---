@@ -1,45 +1,45 @@
 # CODEFORGE AI
 
-An Android-controlled, GitHub-first autonomous coding agent.
+An Android-controlled, GitHub-first coding agent foundation.
 
 ## Current milestone
 
-The repository has a deterministic task-planning core and a dependency-free adapter for the Gemini generateContent API. Adapter tests use mocked HTTP responses, so CI never needs a real API key. The agent does not yet edit external repositories or autonomously execute generated code.
+The Python core now includes task planning, a read-only GitHub REST adapter, bounded patch validation, isolated-branch patch publishing, a controlled workflow, and safe CI-log diagnosis. CI tests use mocked HTTP; no live provider or GitHub write token is required to pass tests.
 
-## Architecture
+The system does not execute model-generated shell commands or project code. The workflow can inspect and validate patches, and the writer can publish a validated patch to a dedicated branch when explicitly invoked with a server-side GitHub token. Creating a branch does not mean the project build was run or the patch is safe to merge.
 
-- **Android client (planned):** submit tasks, follow progress, inspect results.
-- **Agent core:** task validation, planning, bounded tool execution, project memory, and repair loop.
-- **Model adapter:** server-side Gemini API client in `app/model.py`.
-- **GitHub adapter (planned):** inspect files, work on a branch, commit changes, and read Actions logs.
-- **CI gate:** compile Python and run unit tests after every push and pull request.
+## Components
 
-## Free model configuration
+- `app/core.py`: deterministic task validation and planning.
+- `app/model.py`: dependency-free Gemini API adapter (live API use requires a key and may be subject to free-tier quotas).
+- `app/github_adapter.py`: bounded read-only repository, file and GitHub Actions metadata access.
+- `app/patches.py`: strict JSON patch validation and path/size safeguards.
+- `app/github_writer.py`: writes a validated patch to a dedicated branch; never merges into the target branch.
+- `app/workflow.py`: orchestrates inspection, validation and branch preparation.
+- `app/diagnostics.py`: redacts common secrets and detects known CI failure signatures from bounded text logs.
 
-Gemini API offers a free tier for supported models, subject to changing model-specific quotas and rate limits. Do not enable billing if the requirement is strictly $0. A free-tier key can be created in [Google AI Studio](https://aistudio.google.com/apikey).
+## Configuration
 
-Configure these as environment variables on a trusted server or deployment runtime:
+For public repositories, read-only inspection can work without a token, subject to GitHub rate limits. Branch writing requires a server-side `GITHUB_TOKEN` with repository contents write permission. Never put tokens in source code, client apps, logs, or model prompts. Prefer a fine-grained token limited to the intended test repository.
 
-- `GEMINI_API_KEY` — free-tier API key; store it as a secret, never in source code.
-- `GEMINI_MODEL` — optional model name; defaults to `gemini-2.5-flash`.
+The Gemini adapter is optional and is not called by CI. If the requirement is strictly $0, do not enable billing; provider free-tier availability and quotas may change.
 
-The Android app must never contain the provider key. Never print the key in logs or expose it to pull-request code. The current CI intentionally does not call the live model, and adding a repository secret is a separate settings step. Free-tier quotas may change or be exhausted; the client must handle provider errors without exposing secrets.
+## Safety boundaries
 
-## Safety defaults
-
-- Never put API keys in source code, logs, or Android app resources.
-- Work on a dedicated branch; do not push generated changes directly to the target project's main branch.
-- Limit repair attempts and require successful checks before proposing changes for merge.
-- Treat repository contents and build logs as untrusted input.
-- Do not execute model-generated shell commands without explicit allowlisting and isolation.
+- Generated patches are strict JSON data, not shell commands.
+- Repository tree truncation blocks patch validation.
+- Patch writes go to a dedicated branch; no automatic merge is performed.
+- CI log diagnosis treats logs as untrusted text and redacts common token patterns.
+- Repair policy emits a decision label only; it does not execute commands. At most two repair attempts are recommended before stopping.
+- A branch being created is not proof of a successful project build. Build checks and human review are still required.
 
 ## Development
 
-Python 3.12 is used for the core.
+Python 3.12:
 
 ```bash
 python -m compileall -q app tests
 python -m unittest discover -s tests -v
 ```
 
-See the GitHub Actions **CODEFORGE AI CI** workflow for automated validation.
+See GitHub Actions **CODEFORGE AI CI** for validation.

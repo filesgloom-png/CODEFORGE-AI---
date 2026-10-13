@@ -9,6 +9,8 @@ import base64
 import json
 import os
 import re
+import io
+import zipfile
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -36,7 +38,7 @@ class GitHubReadOnlyAdapter:
     ) -> None:
         if not isinstance(repository, str) or not _REPO_RE.fullmatch(repository):
             raise ValueError("repository must use owner/name format.")
-        if not api_base.startswith("https://api.github.com"):
+        if api_base.rstrip("/") != "https://api.github.com":
             raise ValueError("Only the official GitHub API host is supported.")
         self.repository = repository
         self._token = (token if token is not None else os.getenv("GITHUB_TOKEN", "")).strip()
@@ -155,6 +157,58 @@ class GitHubReadOnlyAdapter:
         fields = ("id", "run_number", "name", "status", "conclusion", "head_branch",
                   "head_sha", "html_url", "created_at", "updated_at")
         return {field: payload.get(field) for field in fields}
+
+    def fetch_job_logs(self, job_id: int, max_bytes: int = 5_000_000) -> str:
+        """Download a job log archive and return bounded UTF-8 text files only."""
+        if not isinstance(job_id, int) or isinstance(job_id, bool) or job_id <= 0:
+            raise ValueError("job_id must be a positive integer.")
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or not 1 <= max_bytes <= 5_000_000:
+            raise ValueError("max_bytes must be between 1 and 5,000,000.")
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "CODEFORGE-AI-readonly-adapter",
+        }
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        request = Request(
+            f"{self._api_base}/repos/{self.repository}/actions/jobs/{job_id}/logs",
+            headers=headers,
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=self._timeout) as response:
+                raw = response.read(max_bytes + 1)
+        except HTTPError as exc:
+            raise GitHubAdapterError(f"GitHub log endpoint returned HTTP {exc.code}.") from None
+        except (URLError, TimeoutError, OSError):
+            raise GitHubAdapterError("Could not download GitHub job logs.") from None
+        if len(raw) > max_bytes:
+            raise GitHubAdapterError("Job log archive exceeded the configured size limit.")
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                parts = []
+                total = 0
+                for info in archive.infolist():
+                    name = info.filename
+                    if info.is_dir() or not name.lower().endswith(".txt"):
+                        continue
+                    if name.startswith("/") or ".." in name.replace("\\\\", "/").split("/"):
+                        raise GitHubAdapterError("Log archive contains an unsafe path.")
+                    if info.file_size > max_bytes or total + info.file_size > max_bytes:
+                        raise GitHubAdapterError("Extracted logs exceed the configured size limit.")
+                    data = archive.read(info)
+                    parts.append(data.decode("utf-8", errors="replace"))
+                    total += len(data)
+                if not parts:
+                    raise GitHubAdapterError("Log archive contains no text log files.")
+                return "\\n".join(parts)
+        except zipfile.BadZipFile:
+            # Some compatible API gateways may return a plain text payload.
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise GitHubAdapterError("GitHub returned an unsupported log format.") from None
 
     def list_run_jobs(self, run_id: int, limit: int = 50) -> list[dict[str, Any]]:
         """Read step/job status summaries for a run (not raw log archives)."""

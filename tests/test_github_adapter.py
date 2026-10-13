@@ -16,8 +16,9 @@ class GitHubAdapterTests(unittest.TestCase):
     def test_rejects_invalid_repository_and_non_github_host(self):
         with self.assertRaises(ValueError):
             GitHubReadOnlyAdapter("../bad")
-        with self.assertRaises(ValueError):
-            GitHubReadOnlyAdapter("owner/repo", api_base="https://example.com")
+        for host in ("https://example.com", "https://api.github.com.evil.invalid"):
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                GitHubReadOnlyAdapter("owner/repo", api_base=host)
 
     @patch("app.github_adapter.urlopen")
     def test_tree_returns_only_bounded_metadata(self, mocked):
