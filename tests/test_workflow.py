@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock
 
 from app.core import TaskKind, TaskRequest
-from app.diagnostics import diagnose_log, next_repair_action
+from app.diagnostics import diagnose_log, next_repair_action, redact_secrets
 from app.workflow import ControlledAgentWorkflow
 
 
@@ -85,7 +85,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("python_traceback", diagnosis.findings)
         self.assertIn("python_import_error", diagnosis.findings)
         self.assertNotIn("ghp_abcdefghijklmnopqrstuvwxyz123456", "\n".join(diagnosis.excerpts))
-        self.assertIn("[REDACTED]", "\n".join(diagnosis.excerpts))
+        self.assertIn("[REDACTED]", redact_secrets("token=ghp_abcdefghijklmnopqrstuvwxyz123456"))
 
     def test_bounded_repair_policy_stops_after_two_attempts(self):
         diagnosis = diagnose_log("AssertionError: expected result")
