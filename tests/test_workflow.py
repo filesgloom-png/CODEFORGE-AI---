@@ -43,7 +43,7 @@ class WorkflowTests(unittest.TestCase):
             "changed_files": ["app/new.py"], "checks_run": False,
         }
         patch = json.dumps({"changes": [
-            {"path": "app/new.py", "action": "create", "content": "print('ok')\\n"}
+            {"path": "app/new.py", "action": "create", "content": "print('ok')\n"}
         ]})
         result = self.workflow.prepare_branch(patch, description="fix")
         self.assertEqual(result.status, "branch_prepared")
@@ -77,15 +77,15 @@ class WorkflowTests(unittest.TestCase):
 class DiagnosticsTests(unittest.TestCase):
     def test_detects_failure_and_redacts_tokens(self):
         diagnosis = diagnose_log(
-            "Traceback (most recent call last):\\n"
-            "token=ghp_abcdefghijklmnopqrstuvwxyz123456\\n"
-            "ModuleNotFoundError: No module named 'missing'\\n"
+            "Traceback (most recent call last):\n"
+            "token=ghp_abcdefghijklmnopqrstuvwxyz123456\n"
+            "ModuleNotFoundError: No module named 'missing'\n"
         )
         self.assertEqual(diagnosis.status, "failure_signals")
         self.assertIn("python_traceback", diagnosis.findings)
         self.assertIn("python_import_error", diagnosis.findings)
-        self.assertNotIn("ghp_abcdefghijklmnopqrstuvwxyz123456", "\\n".join(diagnosis.excerpts))
-        self.assertIn("[REDACTED]", "\\n".join(diagnosis.excerpts))
+        self.assertNotIn("ghp_abcdefghijklmnopqrstuvwxyz123456", "\n".join(diagnosis.excerpts))
+        self.assertIn("[REDACTED]", "\n".join(diagnosis.excerpts))
 
     def test_bounded_repair_policy_stops_after_two_attempts(self):
         diagnosis = diagnose_log("AssertionError: expected result")
