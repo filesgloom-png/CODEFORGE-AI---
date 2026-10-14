@@ -241,6 +241,40 @@ class ProjectMemory:
             ).fetchone()
         return dict(updated)
 
+    def attach_repair_run(
+        self, project: str, cycle_id: int, commit_sha: str, run_id: int
+    ) -> dict[str, Any]:
+        """Attach the first verified Actions run for the current repair SHA, idempotently."""
+        project = self._validate_project(project)
+        if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", commit_sha):
+            raise ValueError("commit_sha must be a full Git commit SHA.")
+        if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
+            raise ValueError("run_id must be a positive integer.")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM repair_cycles WHERE project = ? AND id = ?",
+                (project, cycle_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("repair cycle not found in this project.")
+            current = dict(row)
+            if current["current_sha"] != commit_sha.lower():
+                raise ValueError("run SHA does not match the current repair SHA.")
+            if current["state"] in {"completed", "stop_and_report"}:
+                raise ValueError("repair cycle is terminal.")
+            if current["current_run_id"] not in (None, run_id):
+                raise ValueError("a different Actions run is already attached to this repair SHA.")
+            self._connection.execute(
+                "UPDATE repair_cycles SET current_run_id=?, updated_at=? WHERE project=? AND id=?",
+                (run_id, now, project, cycle_id),
+            )
+            updated = self._connection.execute(
+                "SELECT * FROM repair_cycles WHERE project = ? AND id = ?",
+                (project, cycle_id),
+            ).fetchone()
+        return dict(updated)
+
     def update_repair_cycle_status(
         self, project: str, cycle_id: int, state: str, conclusion: str | None = None
     ) -> dict[str, Any]:
