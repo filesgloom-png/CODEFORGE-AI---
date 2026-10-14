@@ -93,6 +93,48 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.details["findings"], ["python_assertion"])
 
 
+    def test_model_proposal_receives_project_memory_and_validates_without_writing(self):
+        model = Mock()
+        model.generate.return_value = json.dumps({"changes": [
+            {"path": "app/existing.py", "action": "update", "content": "VALUE = 2\\n"}
+        ]})
+        self.workflow.model = model
+        self.workflow.remember_fact("decision", "Keep the core dependency-free.")
+        result = self.workflow.propose_patch(
+            TaskRequest("Update the existing value", "owner/repo", TaskKind.FIX)
+        )
+        self.assertEqual(result.status, "patch_proposed")
+        self.assertEqual(result.details["memory_items_used"], 1)
+        self.assertFalse(result.details["written_to_github"])
+        self.assertFalse(result.details["checks_run"])
+        prompt = model.generate.call_args.args[0]
+        self.assertIn("Keep the core dependency-free.", prompt)
+        self.assertIn("app/existing.py", prompt)
+        self.writer.publish_patch.assert_not_called()
+
+    def test_model_proposal_rejects_unsafe_path_before_any_write(self):
+        model = Mock()
+        model.generate.return_value = json.dumps({"changes": [
+            {"path": "../escape.py", "action": "create", "content": "x\\n"}
+        ]})
+        self.workflow.model = model
+        result = self.workflow.propose_patch(
+            TaskRequest("Create a file", "owner/repo", TaskKind.CREATE)
+        )
+        self.assertEqual(result.status, "rejected")
+        self.writer.publish_patch.assert_not_called()
+
+    def test_model_proposal_rejects_malformed_output(self):
+        model = Mock()
+        model.generate.return_value = "Here is the code: print('hello')"
+        self.workflow.model = model
+        result = self.workflow.propose_patch(
+            TaskRequest("Create a file", "owner/repo", TaskKind.CREATE)
+        )
+        self.assertEqual(result.status, "rejected")
+        self.writer.publish_patch.assert_not_called()
+
+
 class DiagnosticsTests(unittest.TestCase):
     def test_detects_failure_and_redacts_tokens(self):
         diagnosis = diagnose_log(
