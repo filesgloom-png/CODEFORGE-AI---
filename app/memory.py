@@ -58,6 +58,27 @@ class ProjectMemory:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project, id DESC)"
             )
+            self._connection.execute(
+                """CREATE TABLE IF NOT EXISTS repair_cycles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project TEXT NOT NULL,
+                    pr_number INTEGER NOT NULL,
+                    source_run_id INTEGER NOT NULL,
+                    source_sha TEXT NOT NULL,
+                    attempts_used INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL,
+                    current_branch TEXT,
+                    current_sha TEXT,
+                    current_run_id INTEGER,
+                    last_conclusion TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(project, pr_number, source_run_id)
+                )"""
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_repair_cycles_project_state ON repair_cycles(project, state, id DESC)"
+            )
 
     @staticmethod
     def _validate_project(project: str) -> str:
