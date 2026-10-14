@@ -292,6 +292,70 @@ class ControlledAgentWorkflow:
             {"cycle": cycle, "max_attempts": 2},
         )
 
+    def publish_repair_patch(
+        self, cycle_id: int, raw_patch: str, description: str = "CODEFORGE AI targeted CI repair"
+    ) -> WorkflowResult:
+        """Revalidate, publish to a fresh isolated branch, open a draft repair PR, and persist the attempt."""
+        cycle = self.memory.get_repair_cycle(self.repository, cycle_id)
+        if cycle is None:
+            return WorkflowResult("rejected", self.repository, "Repair cycle not found in this project.",
+                                  {"cycle_id": cycle_id})
+        if cycle["state"] in {"completed", "stop_and_report", "awaiting_ci"}:
+            return WorkflowResult(
+                "rejected", self.repository, "Cycle is terminal or already awaiting CI; duplicate publication blocked.",
+                {"cycle": cycle},
+            )
+        if cycle["attempts_used"] >= 2:
+            self.memory.update_repair_cycle_status(
+                self.repository, cycle_id, "stop_and_report", conclusion=cycle.get("last_conclusion")
+            )
+            return WorkflowResult("stop_and_report", self.repository, "Two repair attempts have already been used.",
+                                  {"cycle": self.memory.get_repair_cycle(self.repository, cycle_id)})
+        try:
+            original_pr = self.reader.get_pull_request(cycle["pr_number"])
+            if original_pr.get("state") != "open" or original_pr.get("merged"):
+                return WorkflowResult("rejected", self.repository, "Source PR is not open and unmerged.",
+                                      {"pr_number": cycle["pr_number"]})
+            base_branch = original_pr.get("head_branch")
+            if not isinstance(base_branch, str) or not base_branch.startswith("codeforge/"):
+                return WorkflowResult("rejected", self.repository, "Source PR head is not an isolated codeforge/* branch.",
+                                      {"head_branch": base_branch})
+            checked = self.validate_patch(raw_patch, ref=base_branch)
+            if checked.status != "validated":
+                return WorkflowResult("rejected", self.repository, "Repair patch failed fresh validation.",
+                                      {"validation": checked.details})
+            prepared = self.prepare_branch(raw_patch, base_branch=base_branch, description=description)
+            if prepared.status != "branch_prepared":
+                return prepared
+            new_branch = prepared.details.get("branch")
+            new_sha = prepared.details.get("commit_sha")
+            if not isinstance(new_branch, str) or not new_branch.startswith("codeforge/"):
+                return WorkflowResult("rejected", self.repository, "Writer did not confirm an isolated repair branch.",
+                                      {"branch_prepared": prepared.details})
+            if not isinstance(new_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", new_sha):
+                return WorkflowResult("rejected", self.repository, "Writer did not confirm a full repair commit SHA.",
+                                      {"branch_prepared": prepared.details})
+            recorded = self.memory.record_repair_attempt(
+                self.repository, cycle_id, new_branch, new_sha, run_id=None
+            )
+            pr = self.writer.create_pull_request(
+                new_branch, base_branch=base_branch,
+                title="CODEFORGE AI CI repair",
+                body=(f"Targeted repair for source PR #{cycle['pr_number']} and CI run "
+                      f"{cycle['source_run_id']}. Validate the exact head SHA and CI before merging."),
+                draft=True,
+            )
+            return WorkflowResult(
+                "repair_published", self.repository,
+                "Repair patch revalidated and published to a fresh codeforge/* branch with a draft PR. No merge or code execution occurred.",
+                {"cycle": recorded, "branch": new_branch, "commit_sha": new_sha,
+                 "repair_pull_request": pr, "ci_run_id": None,
+                 "next_action": "wait_for_exact_sha_ci", "checks_run": False},
+            )
+        except (ValueError, RuntimeError) as exc:
+            return WorkflowResult("rejected", self.repository, "Repair publication stopped safely.",
+                                  {"reason": str(exc)[:250], "cycle_id": cycle_id})
+
     def record_repair_attempt(
         self, cycle_id: int, branch: str, commit_sha: str, run_id: int
     ) -> WorkflowResult:
