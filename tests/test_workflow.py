@@ -348,6 +348,70 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.details["checked_sha"], "a" * 40)
 
 
+    def test_publish_repair_revalidates_and_creates_only_isolated_draft_pr(self):
+        source_sha = "a" * 40
+        cycle = self.memory.create_repair_cycle("owner/repo", 7, 456, source_sha)
+        self.reader.get_pull_request.return_value = {
+            "number": 7, "state": "open", "merged": False, "head_branch": "codeforge/original",
+            "head_sha": source_sha,
+        }
+        self.writer.publish_patch.return_value = {
+            "branch": "codeforge/repair-one", "commit_sha": "b" * 40,
+            "changed_files": ["app/existing.py"], "checks_run": False, "base_branch": "codeforge/original",
+        }
+        self.writer.create_pull_request.return_value = {
+            "number": 8, "url": "https://github.com/owner/repo/pull/8", "draft": True,
+            "merged": False,
+        }
+        patch = json.dumps({"changes": [
+            {"path": "app/existing.py", "action": "update", "content": "VALUE = 9\\n"}
+        ]})
+        result = self.workflow.publish_repair_patch(cycle["id"], patch)
+        self.assertEqual(result.status, "repair_published")
+        self.assertEqual(result.details["commit_sha"], "b" * 40)
+        self.assertEqual(result.details["cycle"]["attempts_used"], 1)
+        self.writer.publish_patch.assert_called_once()
+        self.writer.create_pull_request.assert_called_once()
+        self.assertEqual(self.writer.create_pull_request.call_args.args[0], "codeforge/repair-one")
+        self.assertEqual(self.writer.create_pull_request.call_args.kwargs["base_branch"], "codeforge/original")
+        self.assertTrue(self.writer.create_pull_request.call_args.kwargs["draft"])
+        repeated = self.workflow.publish_repair_patch(cycle["id"], patch)
+        self.assertEqual(repeated.status, "rejected")
+        self.assertEqual(self.writer.publish_patch.call_count, 1)
+
+    def test_publish_repair_rejects_workflow_path_before_any_write(self):
+        cycle = self.memory.create_repair_cycle("owner/repo", 7, 456, "a" * 40)
+        self.reader.get_pull_request.return_value = {
+            "number": 7, "state": "open", "merged": False, "head_branch": "codeforge/original",
+            "head_sha": "a" * 40,
+        }
+        patch = json.dumps({"changes": [
+            {"path": ".github/workflows/ci.yml", "action": "update", "content": "unsafe"}
+        ]})
+        result = self.workflow.publish_repair_patch(cycle["id"], patch)
+        self.assertEqual(result.status, "rejected")
+        self.writer.publish_patch.assert_not_called()
+        self.writer.create_pull_request.assert_not_called()
+
+    def test_advance_cycle_discovers_ci_run_by_exact_repair_sha(self):
+        cycle = self.memory.create_repair_cycle("owner/repo", 7, 456, "a" * 40)
+        self.memory.record_repair_attempt(
+            "owner/repo", cycle["id"], "codeforge/fix-one", "b" * 40, run_id=None
+        )
+        self.reader.list_workflow_runs_for_sha.return_value = [
+            {"id": 501, "head_sha": "c" * 40, "status": "completed", "conclusion": "success"},
+            {"id": 502, "head_sha": "b" * 40, "status": "completed", "conclusion": "success"},
+        ]
+        self.reader.get_workflow_run.return_value = {
+            "id": 502, "head_sha": "b" * 40, "status": "completed", "conclusion": "success",
+        }
+        result = self.workflow.advance_repair_cycle(cycle["id"])
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.details["checked_sha"], "b" * 40)
+        saved = self.memory.get_repair_cycle("owner/repo", cycle["id"])
+        self.assertEqual(saved["current_run_id"], 502)
+
+
 class DiagnosticsTests(unittest.TestCase):
     def test_detects_failure_and_redacts_tokens(self):
         diagnosis = diagnose_log(
