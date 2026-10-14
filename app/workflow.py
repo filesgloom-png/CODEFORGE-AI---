@@ -255,6 +255,125 @@ class ControlledAgentWorkflow:
             "diagnosed", self.repository, diagnosed.summary, details,
         )
 
+    def start_repair_cycle(
+        self, pr_number: int, source_run_id: int, source_sha: str
+    ) -> WorkflowResult:
+        """Start or recover an idempotent cycle only when the PR and failed run share the exact SHA."""
+        try:
+            pr = self.reader.get_pull_request(pr_number)
+            run = self.reader.get_workflow_run(source_run_id)
+        except (ValueError, RuntimeError) as exc:
+            return WorkflowResult("rejected", self.repository, "Could not verify PR/run identity.",
+                                  {"reason": str(exc)[:250]})
+        if pr.get("merged") or pr.get("state") != "open":
+            return WorkflowResult("rejected", self.repository, "Repair cycles require an open, unmerged PR.",
+                                  {"pr_number": pr_number})
+        if pr.get("head_sha") != source_sha or run.get("head_sha") != source_sha:
+            return WorkflowResult(
+                "rejected", self.repository, "PR head SHA and originating CI SHA must match exactly.",
+                {"pr_head_sha": pr.get("head_sha"), "run_head_sha": run.get("head_sha"),
+                 "requested_sha": source_sha},
+            )
+        if run.get("status") != "completed" or run.get("conclusion") != "failure":
+            return WorkflowResult("rejected", self.repository, "A repair cycle starts only from a completed failed CI run.",
+                                  {"run": run})
+        cycle = self.memory.create_repair_cycle(self.repository, pr_number, source_run_id, source_sha)
+        return WorkflowResult(
+            "repair_cycle_started" if cycle["state"] == "pending" else "repair_cycle_recovered",
+            self.repository, "Persistent repair cycle loaded; duplicate start requests reuse the same cycle.",
+            {"cycle": cycle, "max_attempts": 2},
+        )
+
+    def record_repair_attempt(
+        self, cycle_id: int, branch: str, commit_sha: str, run_id: int
+    ) -> WorkflowResult:
+        """Record a published isolated branch only if its CI run refers to that exact commit SHA."""
+        cycle = self.memory.get_repair_cycle(self.repository, cycle_id)
+        if cycle is None:
+            return WorkflowResult("rejected", self.repository, "Repair cycle not found in this project.",
+                                  {"cycle_id": cycle_id})
+        try:
+            run = self.reader.get_workflow_run(run_id)
+            if run.get("head_sha") != commit_sha:
+                return WorkflowResult(
+                    "rejected", self.repository, "CI run SHA does not match the repair commit SHA.",
+                    {"expected_sha": commit_sha, "run_sha": run.get("head_sha")},
+                )
+            updated = self.memory.record_repair_attempt(
+                self.repository, cycle_id, branch, commit_sha, run_id=run_id
+            )
+        except (ValueError, RuntimeError) as exc:
+            return WorkflowResult("rejected", self.repository, "Repair attempt was not recorded.",
+                                  {"reason": str(exc)[:250]})
+        return WorkflowResult(
+            "repair_attempt_recorded", self.repository,
+            "Attempt persisted against an exact-SHA CI run; no code was executed.",
+            {"cycle": updated, "run": run, "max_attempts": 2},
+        )
+
+    def advance_repair_cycle(self, cycle_id: int) -> WorkflowResult:
+        """Read the recorded run for the exact repair SHA and move the persistent cycle safely."""
+        cycle = self.memory.get_repair_cycle(self.repository, cycle_id)
+        if cycle is None:
+            return WorkflowResult("rejected", self.repository, "Repair cycle not found in this project.",
+                                  {"cycle_id": cycle_id})
+        if cycle["state"] in {"completed", "stop_and_report"}:
+            return WorkflowResult(
+                cycle["state"], self.repository, "Repair cycle is terminal; repeated calls do not reopen it.",
+                {"cycle": cycle, "duplicate_or_terminal": True},
+            )
+        run_id = cycle["current_run_id"] or cycle["source_run_id"]
+        expected_sha = cycle["current_sha"] or cycle["source_sha"]
+        try:
+            run = self.reader.get_workflow_run(run_id)
+        except (ValueError, RuntimeError) as exc:
+            return WorkflowResult("rejected", self.repository, "Could not inspect the recorded CI run.",
+                                  {"reason": str(exc)[:250], "cycle": cycle})
+        if run.get("head_sha") != expected_sha:
+            return WorkflowResult(
+                "rejected", self.repository, "Refusing to advance: CI run SHA differs from recorded cycle SHA.",
+                {"expected_sha": expected_sha, "run_sha": run.get("head_sha"), "cycle": cycle},
+            )
+        if run.get("status") != "completed":
+            return WorkflowResult(
+                "awaiting_ci", self.repository, "The exact-SHA CI run is still in progress.",
+                {"cycle": cycle, "run": run, "checked_sha": expected_sha},
+            )
+        conclusion = run.get("conclusion")
+        if conclusion == "success":
+            updated = self.memory.update_repair_cycle_status(
+                self.repository, cycle_id, "completed", conclusion="success"
+            )
+            return WorkflowResult("completed", self.repository, "Exact-SHA CI succeeded; repair cycle completed.",
+                                  {"cycle": updated, "run": run, "checked_sha": expected_sha})
+        if conclusion in {"failure", "cancelled", "timed_out", "action_required"}:
+            if cycle["attempts_used"] >= 2:
+                updated = self.memory.update_repair_cycle_status(
+                    self.repository, cycle_id, "stop_and_report", conclusion=conclusion
+                )
+                return WorkflowResult("stop_and_report", self.repository,
+                                      "Two repair attempts have been used; no further patch is allowed.",
+                                      {"cycle": updated, "run": run, "checked_sha": expected_sha})
+            if cycle["attempts_used"] == 0:
+                return WorkflowResult(
+                    "repair_ready", self.repository,
+                    "Originating run failed; one isolated repair may be proposed.",
+                    {"cycle": cycle, "run": run, "checked_sha": expected_sha,
+                     "next_action": "propose_repair"},
+                )
+            updated = self.memory.update_repair_cycle_status(
+                self.repository, cycle_id, "pending", conclusion=conclusion
+            )
+            return WorkflowResult(
+                "repair_ready", self.repository, "Repair attempt failed; one further attempt remains.",
+                {"cycle": updated, "run": run, "checked_sha": expected_sha,
+                 "next_action": "propose_repair"},
+            )
+        return WorkflowResult(
+            "stop_and_report", self.repository, "Unrecognized CI conclusion; stop for manual review.",
+            {"cycle": cycle, "run": run, "checked_sha": expected_sha},
+        )
+
     def create_pr_from_branch(
         self,
         branch: str,
