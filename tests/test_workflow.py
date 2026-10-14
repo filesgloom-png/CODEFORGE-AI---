@@ -192,6 +192,84 @@ class WorkflowTests(unittest.TestCase):
         self.reader.fetch_job_logs.assert_called_once_with(789)
 
 
+    def test_create_pr_requires_isolated_branch_and_creates_draft_only(self):
+        rejected = self.workflow.create_pr_from_branch("main")
+        self.assertEqual(rejected.status, "rejected")
+        self.writer.create_pull_request.assert_not_called()
+        self.writer.create_pull_request.return_value = {
+            "number": 17, "url": "https://github.com/owner/repo/pull/17",
+            "draft": True, "merged": False,
+        }
+        created = self.workflow.create_pr_from_branch("codeforge/fix-abc1234")
+        self.assertEqual(created.status, "pull_request_created")
+        self.assertTrue(created.details["draft"])
+        self.assertFalse(created.details["merge_performed"])
+        self.writer.create_pull_request.assert_called_once_with(
+            "codeforge/fix-abc1234", base_branch="main",
+            title="CODEFORGE AI proposed change",
+            body="Validated isolated branch. Review all changes and CI results before merging.",
+            draft=True,
+        )
+
+    def test_inspect_pr_returns_linked_run_jobs_without_mutations(self):
+        self.reader.get_pull_request.return_value = {
+            "number": 7, "state": "open", "draft": True, "head_sha": "abc",
+        }
+        self.reader.list_pull_request_runs.return_value = [
+            {"id": 456, "status": "completed", "conclusion": "failure"},
+        ]
+        self.reader.list_run_jobs.return_value = [{"id": 789, "conclusion": "failure"}]
+        result = self.workflow.inspect_pull_request(7)
+        self.assertEqual(result.status, "pull_request_inspected")
+        self.assertEqual(result.details["runs"][0]["jobs"][0]["id"], 789)
+        self.assertFalse(result.details["merge_performed"])
+
+    def test_repair_proposal_is_validated_and_does_not_publish_or_execute(self):
+        self.reader.get_workflow_run.return_value = {
+            "id": 456, "status": "completed", "conclusion": "failure",
+        }
+        self.reader.list_run_jobs.return_value = [{"id": 789, "conclusion": "failure"}]
+        model = Mock()
+        model.generate.return_value = json.dumps({"changes": [
+            {"path": "app/existing.py", "action": "update", "content": "VALUE = 4\\n"}
+        ]})
+        self.workflow.model = model
+        result = self.workflow.propose_repair_patch(456, "main", attempts_used=0)
+        self.assertEqual(result.status, "repair_patch_proposed")
+        self.assertEqual(result.details["attempt_number"], 1)
+        self.assertEqual(result.details["next_action"], "publish_isolated_branch")
+        self.writer.publish_patch.assert_not_called()
+        self.assertIn("untrusted data", model.generate.call_args.args[0])
+        self.assertIn("AssertionError", model.generate.call_args.args[0])
+
+    def test_repair_policy_stops_before_model_after_two_attempts(self):
+        self.reader.get_workflow_run.return_value = {
+            "id": 456, "status": "completed", "conclusion": "failure",
+        }
+        self.reader.list_run_jobs.return_value = [{"id": 789, "conclusion": "failure"}]
+        model = Mock()
+        self.workflow.model = model
+        result = self.workflow.propose_repair_patch(456, "main", attempts_used=2)
+        self.assertEqual(result.status, "repair_stopped")
+        self.assertEqual(result.details["next_action"], "stop_and_report")
+        model.generate.assert_not_called()
+        self.writer.publish_patch.assert_not_called()
+
+    def test_repair_proposal_is_not_generated_for_successful_run(self):
+        self.reader.get_workflow_run.return_value = {
+            "id": 456, "status": "completed", "conclusion": "success",
+        }
+        model = Mock()
+        self.workflow.model = model
+        result = self.workflow.propose_repair_patch(456, "main", attempts_used=0)
+        self.assertEqual(result.status, "run_not_failed")
+        model.generate.assert_not_called()
+
+    def test_repair_attempt_count_cannot_exceed_two(self):
+        with self.assertRaises(ValueError):
+            self.workflow.propose_repair_patch(456, "main", attempts_used=3)
+
+
 class DiagnosticsTests(unittest.TestCase):
     def test_detects_failure_and_redacts_tokens(self):
         diagnosis = diagnose_log(
