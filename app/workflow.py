@@ -53,6 +53,16 @@ class ControlledAgentWorkflow:
             {"items": items},
         )
 
+    def forget_memory(self, memory_id: int) -> WorkflowResult:
+        """Delete one saved item only when it belongs to this repository."""
+        deleted = self.memory.forget(self.repository, memory_id)
+        return WorkflowResult(
+            "memory_deleted" if deleted else "memory_not_found",
+            self.repository,
+            "Project memory item deleted." if deleted else "No memory item with that ID exists in this project.",
+            {"memory_id": memory_id, "deleted": deleted},
+        )
+
     def remember_fact(self, category: str, content: str) -> WorkflowResult:
         """Save an explicit preference, decision or project fact; secrets are rejected."""
         item = self.memory.remember(self.repository, category, content)
@@ -170,6 +180,79 @@ class ControlledAgentWorkflow:
                 "checks_run": False,
                 "written_to_github": False,
             },
+        )
+
+    def propose_and_prepare_branch(
+        self,
+        task: TaskRequest,
+        ref: str = "main",
+        base_branch: str = "main",
+        description: str = "AI-proposed CODEFORGE patch",
+    ) -> WorkflowResult:
+        """Generate a memory-aware proposal, validate it, and publish only to an isolated branch.
+
+        This does not create a pull request, wait for CI, merge, or execute project code.
+        """
+        proposal = self.propose_patch(task, ref=ref)
+        if proposal.status != "patch_proposed":
+            return proposal
+        prepared = self.prepare_branch(
+            proposal.details["patch"],
+            base_branch=base_branch,
+            description=description,
+        )
+        if prepared.status != "branch_prepared":
+            return prepared
+        details = dict(prepared.details)
+        details["proposal"] = {
+            "memory_items_used": proposal.details.get("memory_items_used", 0),
+            "changed_files": proposal.details.get("changes", []),
+        }
+        details["pull_request_created"] = False
+        details["checks_run"] = False
+        return WorkflowResult(
+            "branch_prepared", self.repository,
+            "Memory-aware model proposal validated and committed to an isolated branch; no PR or CI run was started.",
+            details,
+        )
+
+    def inspect_run(self, run_id: int) -> WorkflowResult:
+        """Inspect a GitHub Actions run and bounded job-step statuses."""
+        run = self.reader.get_workflow_run(run_id)
+        jobs = self.reader.list_run_jobs(run_id, limit=50)
+        return WorkflowResult(
+            "run_inspected", self.repository,
+            "Fetched CI run metadata and job summaries; no code was executed.",
+            {"run": run, "jobs": jobs},
+        )
+
+    def diagnose_run(self, run_id: int, attempts_used: int = 0) -> WorkflowResult:
+        """Diagnose a failed run using its first failed job, bounded by the two-attempt policy."""
+        if not isinstance(attempts_used, int) or isinstance(attempts_used, bool) or not 0 <= attempts_used <= 2:
+            raise ValueError("attempts_used must be between 0 and 2.")
+        run = self.reader.get_workflow_run(run_id)
+        if run.get("status") != "completed" or run.get("conclusion") == "success":
+            return WorkflowResult(
+                "run_not_failed", self.repository,
+                "Run is not a completed failure; no repair should be generated.",
+                {"run": run, "attempts_used": attempts_used, "next_action": "wait_or_review"},
+            )
+        jobs = self.reader.list_run_jobs(run_id, limit=50)
+        failed = next(
+            (job for job in jobs if job.get("conclusion") == "failure" and isinstance(job.get("id"), int)),
+            None,
+        )
+        if failed is None:
+            return WorkflowResult(
+                "diagnosed", self.repository,
+                "Run failed but no failed job was identified; manual review required.",
+                {"run": run, "jobs": jobs, "attempts_used": attempts_used, "next_action": "stop_and_report"},
+            )
+        diagnosed = self.diagnose_job(failed["id"], attempts_used=attempts_used)
+        details = dict(diagnosed.details)
+        details.update({"run": run, "next_attempt_number": attempts_used + 1 if details["next_action"] == "request_targeted_patch" else None})
+        return WorkflowResult(
+            "diagnosed", self.repository, diagnosed.summary, details,
         )
 
     def validate_patch(self, raw_patch: str, ref: str = "main") -> WorkflowResult:
