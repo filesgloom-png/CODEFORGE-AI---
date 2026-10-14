@@ -119,5 +119,35 @@ class GitHubWriterTests(unittest.TestCase):
         request.assert_not_called()
 
 
+    def test_create_pull_request_only_accepts_isolated_branch_and_never_merges(self):
+        writer = GitHubPatchWriter("owner/repo", token="fake-token")
+        with self.assertRaises(ValueError):
+            writer.create_pull_request("main")
+        with patch.object(writer, "_request_json", return_value={
+            "number": 12, "html_url": "https://github.com/owner/repo/pull/12",
+            "title": "test", "state": "open", "draft": True,
+        }) as request:
+            result = writer.create_pull_request("codeforge/fix-1234567")
+        self.assertEqual(result["number"], 12)
+        self.assertTrue(result["draft"])
+        self.assertFalse(result["merged"])
+        self.assertFalse(result["merge_performed"])
+        self.assertEqual(request.call_args.args[0], "POST")
+        self.assertEqual(request.call_args.args[1], "/repos/owner/repo/pulls")
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["head"], "codeforge/fix-1234567")
+        self.assertEqual(payload["base"], "main")
+        self.assertTrue(payload["draft"])
+        self.assertFalse(payload["maintainer_can_modify"])
+
+    def test_create_pull_request_does_not_expose_api_error_body(self):
+        from urllib.error import HTTPError
+        writer = GitHubPatchWriter("owner/repo", token="fake-token")
+        with patch.object(writer, "_request_json", side_effect=GitHubWriteError("HTTP 403")):
+            with self.assertRaises(GitHubWriteError) as caught:
+                writer.create_pull_request("codeforge/fix-1234567")
+        self.assertNotIn("fake-token", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
