@@ -6,6 +6,7 @@ or project code. Model output is treated as untrusted data and validated before 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -394,8 +395,29 @@ class ControlledAgentWorkflow:
                 cycle["state"], self.repository, "Repair cycle is terminal; repeated calls do not reopen it.",
                 {"cycle": cycle, "duplicate_or_terminal": True},
             )
-        run_id = cycle["current_run_id"] or cycle["source_run_id"]
         expected_sha = cycle["current_sha"] or cycle["source_sha"]
+        run_id = cycle["current_run_id"]
+        if cycle["attempts_used"] > 0 and run_id is None:
+            try:
+                candidates = self.reader.list_workflow_runs_for_sha(expected_sha, limit=20)
+            except (ValueError, RuntimeError) as exc:
+                return WorkflowResult("rejected", self.repository, "Could not locate CI for the exact repair SHA.",
+                                      {"reason": str(exc)[:250], "cycle": cycle})
+            matches = [item for item in candidates if item.get("head_sha") == expected_sha
+                       and isinstance(item.get("id"), int) and item["id"] > 0]
+            if not matches:
+                return WorkflowResult(
+                    "awaiting_ci", self.repository, "No Actions run is visible yet for the exact repair SHA.",
+                    {"cycle": cycle, "checked_sha": expected_sha, "next_action": "retry_inspection"},
+                )
+            matches.sort(key=lambda item: item["id"], reverse=True)
+            run_id = matches[0]["id"]
+            try:
+                cycle = self.memory.attach_repair_run(self.repository, cycle_id, expected_sha, run_id)
+            except ValueError as exc:
+                return WorkflowResult("rejected", self.repository, "Could not safely bind CI run to repair SHA.",
+                                      {"reason": str(exc)[:250], "cycle": cycle})
+        run_id = run_id or cycle["source_run_id"]
         try:
             run = self.reader.get_workflow_run(run_id)
         except (ValueError, RuntimeError) as exc:
