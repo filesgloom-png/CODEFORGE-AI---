@@ -158,6 +158,24 @@ class GitHubReadOnlyAdapter:
                   "head_sha", "html_url", "created_at", "updated_at")
         return {field: payload.get(field) for field in fields}
 
+    def list_workflow_runs_for_sha(self, commit_sha: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Read recent Actions runs filtered by an exact commit SHA."""
+        if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", commit_sha):
+            raise ValueError("commit_sha must be a full Git commit SHA.")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
+            raise ValueError("limit must be between 1 and 50.")
+        payload = self._get_json(
+            f"/repos/{self.repository}/actions/runs?head_sha={quote(commit_sha, safe='')}&per_page={limit}"
+        )
+        runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+        if not isinstance(runs, list):
+            raise GitHubAdapterError("GitHub Actions response has an unexpected shape.")
+        return [{
+            "id": run.get("id"), "name": run.get("name"), "head_sha": run.get("head_sha"),
+            "status": run.get("status"), "conclusion": run.get("conclusion"),
+            "html_url": run.get("html_url"),
+        } for run in runs[:limit] if isinstance(run, dict) and run.get("head_sha") == commit_sha]
+
     def get_pull_request(self, pr_number: int) -> dict[str, Any]:
         """Read bounded metadata for one pull request without exposing credentials."""
         if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
