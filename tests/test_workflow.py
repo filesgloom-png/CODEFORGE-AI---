@@ -270,6 +270,84 @@ class WorkflowTests(unittest.TestCase):
             self.workflow.propose_repair_patch(456, "main", attempts_used=3)
 
 
+    def test_repair_cycle_start_is_idempotent_and_requires_exact_source_sha(self):
+        sha = "a" * 40
+        self.reader.get_pull_request.return_value = {
+            "number": 7, "state": "open", "merged": False, "head_sha": sha,
+        }
+        self.reader.get_workflow_run.return_value = {
+            "id": 456, "status": "completed", "conclusion": "failure", "head_sha": sha,
+        }
+        first = self.workflow.start_repair_cycle(7, 456, sha)
+        again = self.workflow.start_repair_cycle(7, 456, sha)
+        self.assertEqual(first.status, "repair_cycle_started")
+        self.assertEqual(again.status, "repair_cycle_recovered")
+        self.assertEqual(first.details["cycle"]["id"], again.details["cycle"]["id"])
+        self.reader.get_workflow_run.return_value["head_sha"] = "b" * 40
+        mismatch = self.workflow.start_repair_cycle(7, 456, sha)
+        self.assertEqual(mismatch.status, "rejected")
+
+    def test_repair_attempt_requires_run_sha_match_and_duplicate_is_not_counted_twice(self):
+        cycle = self.memory.create_repair_cycle("owner/repo", 7, 456, "a" * 40)
+        self.reader.get_workflow_run.return_value = {
+            "id": 500, "status": "queued", "conclusion": None, "head_sha": "b" * 40,
+        }
+        mismatch = self.workflow.record_repair_attempt(
+            cycle["id"], "codeforge/fix-one", "c" * 40, 500
+        )
+        self.assertEqual(mismatch.status, "rejected")
+        self.reader.get_workflow_run.return_value["head_sha"] = "c" * 40
+        recorded = self.workflow.record_repair_attempt(
+            cycle["id"], "codeforge/fix-one", "c" * 40, 500
+        )
+        duplicate = self.workflow.record_repair_attempt(
+            cycle["id"], "codeforge/fix-one", "c" * 40, 500
+        )
+        self.assertEqual(recorded.details["cycle"]["attempts_used"], 1)
+        self.assertEqual(duplicate.details["cycle"]["attempts_used"], 1)
+
+    def test_advance_cycle_completes_only_on_exact_sha_success_and_is_terminal(self):
+        cycle = self.memory.create_repair_cycle("owner/repo", 7, 456, "a" * 40)
+        self.reader.get_workflow_run.return_value = {
+            "id": 456, "status": "completed", "conclusion": "success", "head_sha": "b" * 40,
+        }
+        mismatch = self.workflow.advance_repair_cycle(cycle["id"])
+        self.assertEqual(mismatch.status, "rejected")
+        self.reader.get_workflow_run.return_value["head_sha"] = "a" * 40
+        completed = self.workflow.advance_repair_cycle(cycle["id"])
+        self.assertEqual(completed.status, "completed")
+        repeated = self.workflow.advance_repair_cycle(cycle["id"])
+        self.assertEqual(repeated.status, "completed")
+        self.assertTrue(repeated.details["duplicate_or_terminal"])
+
+    def test_advance_cycle_stops_after_two_failed_repair_attempts(self):
+        cycle = self.memory.create_repair_cycle("owner/repo", 7, 456, "a" * 40)
+        self.memory.record_repair_attempt(
+            "owner/repo", cycle["id"], "codeforge/fix-one", "b" * 40, 500
+        )
+        self.memory.record_repair_attempt(
+            "owner/repo", cycle["id"], "codeforge/fix-two", "c" * 40, 501
+        )
+        self.reader.get_workflow_run.return_value = {
+            "id": 501, "status": "completed", "conclusion": "failure", "head_sha": "c" * 40,
+        }
+        stopped = self.workflow.advance_repair_cycle(cycle["id"])
+        self.assertEqual(stopped.status, "stop_and_report")
+        self.assertEqual(stopped.details["cycle"]["attempts_used"], 2)
+        repeated = self.workflow.advance_repair_cycle(cycle["id"])
+        self.assertEqual(repeated.status, "stop_and_report")
+        self.assertTrue(repeated.details["duplicate_or_terminal"])
+
+    def test_advance_cycle_waits_for_exact_sha_run_to_finish(self):
+        cycle = self.memory.create_repair_cycle("owner/repo", 7, 456, "a" * 40)
+        self.reader.get_workflow_run.return_value = {
+            "id": 456, "status": "in_progress", "conclusion": None, "head_sha": "a" * 40,
+        }
+        result = self.workflow.advance_repair_cycle(cycle["id"])
+        self.assertEqual(result.status, "awaiting_ci")
+        self.assertEqual(result.details["checked_sha"], "a" * 40)
+
+
 class DiagnosticsTests(unittest.TestCase):
     def test_detects_failure_and_redacts_tokens(self):
         diagnosis = diagnose_log(
