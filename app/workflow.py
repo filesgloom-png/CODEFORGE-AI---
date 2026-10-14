@@ -277,9 +277,17 @@ class ControlledAgentWorkflow:
         if run.get("status") != "completed" or run.get("conclusion") != "failure":
             return WorkflowResult("rejected", self.repository, "A repair cycle starts only from a completed failed CI run.",
                                   {"run": run})
-        cycle = self.memory.create_repair_cycle(self.repository, pr_number, source_run_id, source_sha)
+        existing = self.memory.find_repair_cycle(self.repository, pr_number, source_run_id)
+        if existing is not None and existing["source_sha"] != source_sha.lower():
+            return WorkflowResult(
+                "rejected", self.repository, "This PR/run pair is already bound to a different source SHA.",
+                {"cycle": existing, "requested_sha": source_sha},
+            )
+        cycle = existing or self.memory.create_repair_cycle(
+            self.repository, pr_number, source_run_id, source_sha
+        )
         return WorkflowResult(
-            "repair_cycle_started" if cycle["state"] == "pending" else "repair_cycle_recovered",
+            "repair_cycle_recovered" if existing is not None else "repair_cycle_started",
             self.repository, "Persistent repair cycle loaded; duplicate start requests reuse the same cycle.",
             {"cycle": cycle, "max_attempts": 2},
         )
