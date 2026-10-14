@@ -158,6 +158,44 @@ class GitHubReadOnlyAdapter:
                   "head_sha", "html_url", "created_at", "updated_at")
         return {field: payload.get(field) for field in fields}
 
+    def get_pull_request(self, pr_number: int) -> dict[str, Any]:
+        """Read bounded metadata for one pull request without exposing credentials."""
+        if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+            raise ValueError("pr_number must be a positive integer.")
+        payload = self._get_json(f"/repos/{self.repository}/pulls/{pr_number}")
+        if not isinstance(payload, dict):
+            raise GitHubAdapterError("GitHub pull request response has an unexpected shape.")
+        head = payload.get("head") if isinstance(payload.get("head"), dict) else {}
+        base = payload.get("base") if isinstance(payload.get("base"), dict) else {}
+        return {
+            "number": payload.get("number"), "state": payload.get("state"),
+            "draft": payload.get("draft"), "merged": payload.get("merged"),
+            "title": payload.get("title"), "html_url": payload.get("html_url"),
+            "head_branch": head.get("ref"), "head_sha": head.get("sha"),
+            "base_branch": base.get("ref"), "base_sha": base.get("sha"),
+            "mergeable": payload.get("mergeable"),
+        }
+
+    def list_pull_request_runs(self, pr_number: int, limit: int = 20) -> list[dict[str, Any]]:
+        """Read recent Actions runs associated with a PR head SHA; never starts runs."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 50:
+            raise ValueError("limit must be between 1 and 50.")
+        pr = self.get_pull_request(pr_number)
+        head_sha = pr.get("head_sha")
+        if not isinstance(head_sha, str) or not head_sha:
+            raise GitHubAdapterError("Pull request has no readable head SHA.")
+        payload = self._get_json(
+            f"/repos/{self.repository}/actions/runs?head_sha={quote(head_sha, safe='')}&per_page={limit}"
+        )
+        runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+        if not isinstance(runs, list):
+            raise GitHubAdapterError("GitHub Actions response has an unexpected shape.")
+        return [{
+            "id": run.get("id"), "name": run.get("name"),
+            "head_sha": run.get("head_sha"), "status": run.get("status"),
+            "conclusion": run.get("conclusion"), "html_url": run.get("html_url"),
+        } for run in runs[:limit] if isinstance(run, dict)]
+
     def fetch_job_logs(self, job_id: int, max_bytes: int = 5_000_000) -> str:
         """Download a job log archive and return bounded UTF-8 text files only."""
         if not isinstance(job_id, int) or isinstance(job_id, bool) or job_id <= 0:
