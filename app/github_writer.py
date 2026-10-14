@@ -160,3 +160,40 @@ class GitHubPatchWriter:
             "pull_request_created": False,
             "checks_run": False,
         }
+
+    def create_pull_request(
+        self,
+        head_branch: str,
+        base_branch: str = "main",
+        title: str = "CODEFORGE AI proposed change",
+        body: str = "Created from a validated isolated CODEFORGE AI branch. Review the diff and CI before merging.",
+        draft: bool = True,
+    ) -> dict[str, Any]:
+        """Create a draft PR only from a dedicated codeforge/* branch; never merge it."""
+        if not isinstance(head_branch, str) or not re.fullmatch(r"codeforge/[A-Za-z0-9._/-]{1,100}", head_branch):
+            raise ValueError("head_branch must be a dedicated codeforge/* branch.")
+        if ".." in head_branch.split("/") or head_branch.startswith("/"):
+            raise ValueError("head_branch contains an unsafe path segment.")
+        if not isinstance(base_branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", base_branch):
+            raise ValueError("base_branch contains unsupported characters.")
+        if ".." in base_branch.split("/") or base_branch.startswith("/") or head_branch == base_branch:
+            raise ValueError("base_branch is unsafe or identical to head_branch.")
+        if not isinstance(title, str) or not title.strip() or len(title) > 200:
+            raise ValueError("title must contain 1..200 characters.")
+        if not isinstance(body, str) or len(body) > 20_000:
+            raise ValueError("body must be text no longer than 20,000 characters.")
+        payload = self._request_json("POST", f"/repos/{self.repository}/pulls", {
+            "title": title.strip(), "body": body,
+            "head": head_branch, "base": base_branch, "draft": bool(draft),
+            "maintainer_can_modify": False,
+        })
+        number = payload.get("number")
+        url = payload.get("html_url")
+        if not isinstance(number, int) or not isinstance(url, str):
+            raise GitHubWriteError("GitHub did not confirm the pull request; inspect the repository before retrying.")
+        return {
+            "number": number, "url": url, "title": payload.get("title"),
+            "state": payload.get("state"), "draft": payload.get("draft", bool(draft)),
+            "head_branch": head_branch, "base_branch": base_branch,
+            "merged": False, "merge_performed": False,
+        }
