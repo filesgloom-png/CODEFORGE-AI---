@@ -135,6 +135,63 @@ class WorkflowTests(unittest.TestCase):
         self.writer.publish_patch.assert_not_called()
 
 
+    def test_memory_can_be_deleted_only_from_own_project(self):
+        item = self.workflow.remember_fact("preference", "Prefer short summaries.")
+        memory_id = item.details["item"]["id"]
+        self.assertEqual(self.workflow.forget_memory(memory_id).status, "memory_deleted")
+        self.assertEqual(self.workflow.forget_memory(memory_id).status, "memory_not_found")
+        self.workflow.remember_fact("preference", "Another project-specific preference.")
+        self.assertEqual(self.memory.recall("other/repo"), [])
+
+    def test_propose_and_prepare_commits_only_after_valid_model_proposal(self):
+        model = Mock()
+        model.generate.return_value = json.dumps({"changes": [
+            {"path": "app/existing.py", "action": "update", "content": "VALUE = 3\\n"}
+        ]})
+        self.workflow.model = model
+        self.writer.publish_patch.return_value = {
+            "branch": "codeforge/ai-proposed-abc1234", "commit_sha": "commit-sha",
+            "changed_files": ["app/existing.py"], "checks_run": False, "base_branch": "main",
+        }
+        result = self.workflow.propose_and_prepare_branch(
+            TaskRequest("Update value", "owner/repo", TaskKind.FIX)
+        )
+        self.assertEqual(result.status, "branch_prepared")
+        self.assertFalse(result.details["pull_request_created"])
+        self.assertFalse(result.details["checks_run"])
+        self.writer.publish_patch.assert_called_once()
+        self.assertEqual(result.details["proposal"]["memory_items_used"], 0)
+
+    def test_propose_and_prepare_does_not_write_when_model_output_is_invalid(self):
+        model = Mock()
+        model.generate.return_value = "not JSON"
+        self.workflow.model = model
+        result = self.workflow.propose_and_prepare_branch(
+            TaskRequest("Update value", "owner/repo", TaskKind.FIX)
+        )
+        self.assertEqual(result.status, "rejected")
+        self.writer.publish_patch.assert_not_called()
+
+    def test_inspect_run_returns_run_and_job_statuses(self):
+        self.reader.get_workflow_run.return_value = {
+            "id": 456, "status": "completed", "conclusion": "success",
+        }
+        self.reader.list_run_jobs.return_value = [{"id": 789, "conclusion": "success"}]
+        result = self.workflow.inspect_run(456)
+        self.assertEqual(result.status, "run_inspected")
+        self.assertEqual(result.details["jobs"][0]["id"], 789)
+
+    def test_diagnose_run_uses_failed_job_and_stops_after_two_attempts(self):
+        self.reader.get_workflow_run.return_value = {
+            "id": 456, "status": "completed", "conclusion": "failure",
+        }
+        self.reader.list_run_jobs.return_value = [{"id": 789, "conclusion": "failure"}]
+        result = self.workflow.diagnose_run(456, attempts_used=2)
+        self.assertEqual(result.status, "diagnosed")
+        self.assertEqual(result.details["next_action"], "stop_and_report")
+        self.reader.fetch_job_logs.assert_called_once_with(789)
+
+
 class DiagnosticsTests(unittest.TestCase):
     def test_detects_failure_and_redacts_tokens(self):
         diagnosis = diagnose_log(
