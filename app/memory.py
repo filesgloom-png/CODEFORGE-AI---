@@ -167,6 +167,22 @@ class ProjectMemory:
             ).fetchone()
         return dict(row)
 
+    def find_repair_cycle(
+        self, project: str, pr_number: int, source_run_id: int
+    ) -> dict[str, Any] | None:
+        """Find an existing cycle by its idempotency key."""
+        project = self._validate_project(project)
+        for name, value in (("pr_number", pr_number), ("source_run_id", source_run_id)):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer.")
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT * FROM repair_cycles
+                WHERE project = ? AND pr_number = ? AND source_run_id = ?""",
+                (project, pr_number, source_run_id),
+            ).fetchone()
+        return dict(row) if row else None
+
     def get_repair_cycle(self, project: str, cycle_id: int) -> dict[str, Any] | None:
         project = self._validate_project(project)
         if not isinstance(cycle_id, int) or isinstance(cycle_id, bool) or cycle_id <= 0:
